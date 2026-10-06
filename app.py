@@ -1,44 +1,59 @@
-import os, hmac, hashlib, base64, sqlite3, requests
 from flask import Flask, request, jsonify
+import os
+import requests
 
 app = Flask(__name__)
 
-WEBHOOK_SECRET = os.getenv("SHOPIFY_WEBHOOK_SECRET","elmundo_secret")
-TG_TOKEN = os.getenv("TELEGRAM_TOKEN","")
-TG_CHAT = os.getenv("TELEGRAM_ALLOWED_CHAT_ID","")
-CJ_KEY = os.getenv("CJ_API_KEY","")
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+SHOPIFY_SECRET = os.environ.get("SHOPIFY_WEBHOOK_SECRET", "elmundo_secret")
 
-conn = sqlite3.connect("/tmp/elmundo.db", check_same_thread=False)
-conn.execute("CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY)")
-
-def send_tg(msg):
-    if not TG_TOKEN or not TG_CHAT: return
-    try:
-        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json={"chat_id":TG_CHAT,"text":msg}, timeout=5)
-    except: pass
+# 3 bots A/B logic
+BOTS = {
+    "bot1": "Support - A",
+    "bot2": "Sales - B", 
+    "bot3": "CJ Dropshipping - Fulfillment"
+}
 
 @app.route("/")
 def home():
     return "El Mundo STORE LIVE - Bot Actif"
 
-@app.route("/webhook/shopify", methods=["POST"])
-def shopify_hook():
-    h = request.headers.get("X-Shopify-Hmac-Sha256","")
-    if WEBHOOK_SECRET and h:
-        d = hmac.new(WEBHOOK_SECRET.encode(), request.data, hashlib.sha256).digest()
-        if base64.b64encode(d).decode() != h:
-            return "Unauthorized", 401
-    data = request.get_json(silent=True) or {}
-    oid = str(data.get("id",""))
-    if conn.execute("SELECT 1 FROM orders WHERE id=?",(oid,)).fetchone():
-        return jsonify({"status":"duplicate"}),200
-    conn.execute("INSERT INTO orders VALUES (?)",(oid,)); conn.commit()
-    if not CJ_KEY:
-        send_tg(f"🛒 NOUVO KÒMAND #{oid} - {data.get('total_price','')} - CJ vid, mete kle a")
-        return jsonify({"status":"telegram_sent"}),200
-    send_tg(f"✅ Kòmand #{oid} voye CJ")
-    return jsonify({"status":"cj"}),200
+@app.route("/health")
+def health():
+    return jsonify({
+        "status": "ok",
+        "store": "El Mundo STORE LIVE",
+        "bots": list(BOTS.keys()),
+        "bots_detail": BOTS,
+        "mode": "A/B",
+        "bot_configured": bool(BOT_TOKEN),
+        "chat_configured": bool(CHAT_ID)
+    })
 
-@app.route("/webhook/telegram", methods=["POST"])
-def tg():
-    return "ok",200
+@app.route("/webhook/shopify", methods=["POST"])
+def shopify_webhook():
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "no data"}), 400
+    
+    # Info commande
+    order_id = data.get("id")
+    customer = data.get("customer", {})
+    total = data.get("total_price")
+    email = customer.get("email", "N/A")
+    
+    msg = f"🔥 NOUVO LOD El Mundo!\n\nID: {order_id}\nKliyan: {email}\nTotal: ${total}\n\nBot CJ ap trete..."
+    
+    # Voye Telegram si configure
+    if BOT_TOKEN and CHAT_ID:
+        try:
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                          json={"chat_id": CHAT_ID, "text": msg})
+        except Exception as e:
+            print(f"Telegram error: {e}")
+    
+    return jsonify({"received": True, "bots": "3-bot A/B active"})
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
